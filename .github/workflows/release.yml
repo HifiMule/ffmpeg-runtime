@@ -1,0 +1,102 @@
+name: Build FFmpeg runtime
+
+on:
+  push:
+    tags: ['ffmpeg-*-r*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - runner: windows-latest
+            target: x86_64-pc-windows-msvc
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+          - runner: macos-15
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+      - name: Verify release identity
+        if: github.event_name == 'push'
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: node --input-type=module -e "import { releaseTag } from './scripts/runtime-package.mjs'; if (releaseTag !== process.env.RELEASE_TAG) throw new Error('Tag must match manifest version/revision');"
+      - name: Install Linux source tools
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config nasm gnupg curl xz-utils binutils
+      - name: Install macOS source tools
+        if: runner.os == 'macOS'
+        run: brew install pkg-config nasm gnupg
+      - name: Install Windows source tools
+        if: runner.os == 'Windows'
+        id: msys2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          install: make sed grep gawk diffutils pkgconf gnupg
+          path-type: inherit
+      - name: Select Windows MSYS2
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          MSYS2_LOCATION: ${{ steps.msys2.outputs.msys2-location }}
+        run: '"MSYS2_ROOT=$env:MSYS2_LOCATION" >> $env:GITHUB_ENV'
+      - name: Test build contracts
+        run: node --test tests/*.test.mjs
+      - name: Build and validate relocated archive
+        run: node scripts/package-runtime.mjs ${{ matrix.target }}
+      - uses: actions/upload-artifact@v6
+        with:
+          name: runtime-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    if: github.event_name == 'push'
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+      - uses: actions/download-artifact@v6
+        with:
+          pattern: runtime-*
+          path: dist
+          merge-multiple: true
+      - name: Verify complete release manifest
+        run: node scripts/release-manifest.mjs dist
+      - name: Publish verified runtime assets
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const fs = require('node:fs');
+            const path = require('node:path');
+            const { owner, repo } = context.repo;
+            const tag = context.ref.replace('refs/tags/', '');
+            const existing = await github.rest.repos.getReleaseByTag({ owner, repo, tag }).catch(error => { if (error.status === 404) return null; throw error; });
+            if (existing) throw new Error('Release already exists: bump recipeRevision rather than replacing assets');
+            const { data: release } = await github.rest.repos.createRelease({ owner, repo, tag_name: tag, name: tag, draft: true, body: 'Verified FFmpeg development/runtime archives for HifiMule. See release-manifest.json for SHA-256, build identity and producer commit.' });
+            for (const name of fs.readdirSync('dist')) {
+              const data = fs.readFileSync(path.join('dist', name));
+              await github.rest.repos.uploadReleaseAsset({ owner, repo, release_id: release.id, name, data });
+            }
+            await github.rest.repos.updateRelease({ owner, repo, release_id: release.id, draft: false });
