@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "recipeRevision": 1,
+  "recipeRevision": 2,
   "ffmpegRelease": "9.0.2",
   "sourceUrl": "https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz",
   "signatureUrl": "https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz.asc",

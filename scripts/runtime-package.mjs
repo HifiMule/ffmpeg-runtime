@@ -14,10 +14,15 @@ export const assetName = target => `${releaseTag}-${target}.tar.gz`;
 export function relocateRuntime(prefix, target, previousPrefix, execute = execFileSync, finalPrefix = prefix) {
   const pcdir = join(prefix, 'lib/pkgconfig');
   const portable = finalPrefix.replaceAll('\\', '/');
+  const previousPortable = previousPrefix.replaceAll('\\', '/');
+  const previousPaths = new Set([previousPrefix, previousPortable,
+    previousPortable.replace(/^([A-Za-z]):/, (_, drive) => `/${drive.toLowerCase()}`)]);
   if (existsSync(pcdir)) for (const name of readdirSync(pcdir).filter(name => name.endsWith('.pc'))) {
     const path = join(pcdir, name);
-    const text = readFileSync(path, 'utf8');
-    // All runtime metadata describes the extracted SDK, including private codecs.
+    let text = readFileSync(path, 'utf8');
+    // FFmpeg emits absolute libdir/includedir values as well as prefix.
+    // Relocate every reference, including flags and private codec metadata.
+    for (const previous of previousPaths) text = text.split(previous).join(portable);
     writeFileSync(path, text.replace(/^prefix=.*$/m, `prefix=${portable}`));
   }
   if (manifest.targets[target]?.platform !== 'darwin') return;
