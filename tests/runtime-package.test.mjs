@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { gzipSync } from 'node:zlib';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -51,4 +52,36 @@ test('build contract excludes application settings and keeps four shipping targe
   for (const key of ['bufferPolicy', 'bindingVersions', 'verification']) assert.equal(key in manifest, false);
   assert.match(buildIdentity, /^[a-f0-9]{64}$/);
   assert.ok(manifest.windowsConfigureFlags.includes('--extra-cflags=-MD'));
+});
+
+test('relocated FFmpeg pkg-config metadata resolves absolute paths without the producer directory', t => {
+  const prefix = mkdtempSync(join(tmpdir(), 'runtime-pkgconfig-'));
+  t.after(() => rmSync(prefix, { recursive: true, force: true }));
+  const directory = join(prefix, 'lib/pkgconfig');
+  mkdirSync(directory, { recursive: true });
+  const metadata = join(directory, 'libavcodec.pc');
+  writeFileSync(metadata, [
+    'prefix=/removed/producer',
+    'exec_prefix=${prefix}',
+    'libdir=/removed/producer/lib',
+    'includedir=/removed/producer/include',
+    'Name: libavcodec', 'Description: FFmpeg codec library', 'Version: 63.1.102',
+    'Libs: -L${libdir} -lavcodec',
+    'Cflags: -I${includedir}',
+    'Libs.private: -L/removed/producer/lib -lmp3lame', '',
+  ].join('\n'));
+  relocateRuntime(prefix, 'x86_64-unknown-linux-gnu', '/removed/producer');
+  const portable = prefix.replaceAll('\\', '/');
+  const relocated = readFileSync(metadata, 'utf8');
+  assert.ok(!relocated.includes('/removed/producer'));
+  assert.ok(relocated.includes(`libdir=${portable}/lib\n`));
+  assert.ok(relocated.includes(`includedir=${portable}/include\n`));
+  assert.ok(relocated.includes(`Libs.private: -L${portable}/lib -lmp3lame`));
+  if (spawnSync('pkg-config', ['--version']).status === 0) {
+    const env = { ...process.env, PKG_CONFIG_PATH: directory, PKG_CONFIG_LIBDIR: directory };
+    for (const [variable, suffix] of [['libdir', 'lib'], ['includedir', 'include']]) {
+      const actual = execFileSync('pkg-config', [`--variable=${variable}`, 'libavcodec'], { env, encoding: 'utf8' }).trim();
+      assert.equal(actual, `${portable}/${suffix}`);
+    }
+  }
 });
